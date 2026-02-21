@@ -1,0 +1,85 @@
+name: PR Check
+
+on:
+  push:
+    branches:
+      - "worker/**"
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy-check:
+    name: policy-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate branch and commit metadata
+        run: |
+          REF="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          if ! echo "$REF" | grep -Eq '^worker/.+'; then
+            echo "Invalid worker branch: $REF" >&2
+            exit 1
+          fi
+          if ! echo "$REF" | grep -Eq '[0-9]+'; then
+            echo "Missing task number in branch: $REF" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            MSG=$(git log -1 --pretty=%s)
+            if [[ "$MSG" != *"TASK-"* ]]; then
+              echo "Commit message must include TASK-* token" >&2
+              exit 1
+            fi
+          fi
+
+  lint-format:
+    name: lint-format
+    runs-on: ubuntu-latest
+    needs: [policy-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax compile
+        run: python -m compileall src scripts
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-latest
+    needs: [policy-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m pytest tests/unit -v
+
+  acceptance-tests:
+    name: acceptance-tests
+    runs-on: ubuntu-latest
+    needs: [policy-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: python -m pip install -r requirements.txt
+      - name: Resolve marker and run acceptance
+        run: |
+          REF="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          NUM=$(echo "$REF" | grep -Eo '[0-9]+' | tail -1)
+          if [[ -z "$NUM" ]]; then
+            echo "Cannot parse task number from branch: $REF" >&2
+            exit 1
+          fi
+          MARKER=$(printf 'task_%03d' "$NUM")
+          python -m pytest tests/acceptance -m "$MARKER" -v
